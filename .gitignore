@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+board/
+.env
+.backups/
+.DS_store
+.board/
+
+.eachboard/
