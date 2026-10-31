@@ -301,7 +301,7 @@ def cmd_retract(args):
         meta = {"seq": seq, "sender": c.WHO, "created": time.time(),
                 "to": record.get("to", []), "reply_to": None, "task_id": None,
                 "attachments": [], "retracts": mid}
-        content = c.WHO + " recalled a message #" + str(record["seq"])
+        content = c.WHO + " retracted message #" + str(record["seq"])
         event_id = c.publish_message(cid, meta, content)
     c.out({"ok": True, "msg_id": event_id, "retracts": mid,
            "target_seq": record["seq"], "created": meta["created"], "already": False})

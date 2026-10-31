@@ -942,10 +942,10 @@ class RetractionTests(unittest.TestCase):
         self.assertEqual(event["target_seq"], 1)
         # read first: the notification is new work, the retracted original is not.
         self.assertEqual([m["content"] for m in self.run_eachboard("read", who="reviewer")["messages"]],
-                         ["writer 撤回了消息 #1"])
+                         ["writer retracted message #1"])
         listed = self.run_eachboard("list", who="reviewer")["messages"]
         self.assertEqual([m["content"] for m in listed],
-                         ["[retracted]", "writer 撤回了消息 #1"])
+                         ["[retracted]", "writer retracted message #1"])
         self.assertTrue(listed[0]["retracted"])
         self.assertEqual(listed[0]["retraction_id"], event["msg_id"])
         self.assertEqual(listed[0]["retracted_by"], "writer")
@@ -1131,7 +1131,7 @@ class RetractionTests(unittest.TestCase):
         self.retract(sent[0]['msg_id'])
         listed = self.run_eachboard('list', who='reviewer')['messages']
         self.assertEqual([m['content'] for m in listed],
-                         ['[retracted]', 'old-1', 'writer 撤回了消息 #1'])
+                         ['[retracted]', 'old-1', 'writer retracted message #1'])
 
     def test_retraction_object_survives_crash_before_index_append(self):
         sent = self.send('obsolete')
@@ -1148,7 +1148,7 @@ commands.cmd_retract(SimpleNamespace(msg_id=MID))
         self.assertEqual(crashed.returncode, 9)
         self.assertTrue(self._conversation_path('.index-dirty').exists())
         messages = self.run_eachboard('read', who='reviewer')['messages']
-        self.assertEqual([m['content'] for m in messages], ['writer 撤回了消息 #1'])
+        self.assertEqual([m['content'] for m in messages], ['writer retracted message #1'])
         self.assertFalse(self._conversation_path('.index-dirty').exists())
         retried = self.retract(sent['msg_id'])
         self.assertTrue(retried['already'])
@@ -1223,7 +1223,7 @@ else: raise AssertionError('expected failed output')
         self.assertEqual([m['seq'] for m in listed], list(range(1, 16)))
         self.assertEqual(listed[9]['content'], '[retracted]')
         self.assertEqual(listed[14]['msg_id'], event['msg_id'])
-        self.assertEqual(listed[14]['content'], 'writer 撤回了消息 #10')
+        self.assertEqual(listed[14]['content'], 'writer retracted message #10')
 
 
 if __name__ == "__main__":
