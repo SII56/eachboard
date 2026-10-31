@@ -75,9 +75,11 @@ def cmd_open(args):
 
 def cmd_status(args):
     cid = c.current_conv()
+    totals = c.counts(cid)
     c.out({"ok": True, "conv_id": cid, "who": c.WHO, "root": str(c.ROOT),
            "participants": c.load_json(c.conv_dir(cid) / "meta.json")["participants"],
-           "ack_required": True, "workspace": str(c.WORKSPACE) if c.WORKSPACE else None})
+           "ack_required": True, "unseen": totals["unseen"], "pending": totals["pending"],
+           "workspace": str(c.WORKSPACE) if c.WORKSPACE else None})
 
 
 def _env_flag(name):
@@ -193,37 +195,45 @@ def cmd_send(args):
             reply_record = c.load_message(cid, args.reply_to)
             if not c.visible(reply_record):
                 c.fail("message not found", "message_not_found")
-        # Warn, but never block: the sequence and message publish as usual.
-        unread = c.first_unread_locked(cid)
+        # Block before allocating a sequence or writing anything.
+        unseen = c.first_unseen_locked(cid)
+        if unseen is not None:
+            c.fail("unread messages have not been displayed yet; run python3 eachboard.py read first"
+                   " (first unseen: seq " + str(unseen["seq"]) + " from " + unseen["sender"]
+                   + ", msg_id " + unseen["msg_id"] + ")", "unread_messages")
         seq = c.next_sequence(cid)
         meta = {"seq": seq, "sender": c.WHO, "created": time.time(), "to": recipients,
                 "reply_to": args.reply_to, "task_id": args.task_id, "attachments": attachments}
         mid = c.publish_message(cid, meta, content)
-    result = {"ok": True, "msg_id": mid, **meta}
-    if unread is not None:
-        result["warnings"] = [
-            "unread messages pending: seq " + str(unread["seq"]) + " from "
-            + unread["sender"] + " (msg_id " + unread["msg_id"]
-            + "); read and ack them when processed"]
-    c.out(result)
+    c.out({"ok": True, "msg_id": mid, **meta})
 
 
-def fetch(args, unread):
-    cid = c.current_conv()
-    msgs = c.messages(cid, unread=unread, after_seq=args.after_seq, limit=args.limit)
+def output_page(cid, msgs, after_seq=0, ack=False):
+    """Flush a page before recording its displayed and optional processed IDs."""
     c.out({"ok": True, "count": len(msgs), "messages": msgs,
-           "next_after_seq": msgs[-1]["seq"] if msgs else args.after_seq})
-    if getattr(args, "ack", False) and msgs:
-        # Output first, then confirm the whole page with one journal append.
-        c.stamp_many(cid, [m["msg_id"] for m in msgs], c.WHO)
-
-
-def cmd_unread(args):
-    fetch(args, True)
+           "next_after_seq": msgs[-1]["seq"] if msgs else after_seq})
+    if msgs:
+        # A placeholder for a retracted message was never actually displayed, so
+        # it must not be recorded as seen. Retraction notifications are read-only
+        # information: they are marked seen but never acknowledged.
+        shown = [m["msg_id"] for m in msgs if not m.get("retracted")]
+        if shown:
+            c.mark_seen_many(cid, shown, c.WHO)
+        if ack:
+            ackable = [m["msg_id"] for m in msgs
+                       if not m.get("retracts") and not m.get("retracted")]
+            if ackable:
+                c.stamp_many(cid, ackable, c.WHO)
 
 
 def cmd_read(args):
-    fetch(args, True)
+    # Default view: what has not been shown yet. --pending switches to the
+    # older question "what have I not finished", which includes messages that
+    # were already displayed.
+    cid = c.current_conv()
+    mode = "pending" if getattr(args, "pending", False) else "unseen"
+    msgs = c.messages(cid, mode=mode, after_seq=args.after_seq, limit=args.limit)
+    output_page(cid, msgs, args.after_seq, ack=getattr(args, "ack", False))
 
 
 def cmd_list(args):
@@ -231,28 +241,70 @@ def cmd_list(args):
     if args.after_seq is None:
         # Default view: the newest messages, still shown in ascending order.
         msgs = c.messages_latest(cid, limit=args.limit)
-        cursor = msgs[-1]["seq"] if msgs else 0
+        cursor = 0
     else:
         # Explicit cursor (including 0) keeps forward pagination semantics.
-        msgs = c.messages(cid, unread=False, after_seq=args.after_seq, limit=args.limit)
-        cursor = msgs[-1]["seq"] if msgs else args.after_seq
-    c.out({"ok": True, "count": len(msgs), "messages": msgs, "next_after_seq": cursor})
+        msgs = c.messages(cid, mode="all", after_seq=args.after_seq, limit=args.limit)
+        cursor = args.after_seq
+    output_page(cid, msgs, cursor)
 
 
 def cmd_ack(args):
     cid = c.current_conv()
     # Validate the entire batch before recording any confirmations.
     ids = list(dict.fromkeys(args.msg_ids))
-    for mid in ids:
-        c.get_message(cid, mid)
-    c.stamp_many(cid, ids, c.WHO)
+    with c.lock(c.conv_dir(cid) / ".send.lock"):
+        c.ensure_index_locked(cid)
+        records = c.get_messages_locked(cid, ids)
+        for record in records:
+            if record.get("retracts") or record.get("retracted"):
+                c.fail("message " + record["msg_id"] + " is retracted or a retraction notification;"
+                       " acknowledgement is not required", "ack_not_required")
+        c.stamp_many(cid, ids, c.WHO)
     c.out({"ok": True, "acked": ids})
 
 
 def cmd_show(args):
     cid = c.current_conv()
-    message = c.get_message(cid, args.msg_id)
+    force = getattr(args, "force", False)
+    message = c.get_message(cid, args.msg_id, force=force)
     c.out({"ok": True, "message": message})
+    # A placeholder is not a display of the original body, so it does not mark
+    # the message as seen; --force does show the original and may record it.
+    if not message.get("retracted") or force:
+        c.mark_seen_many(cid, [message["msg_id"]], c.WHO)
+
+
+def cmd_retract(args):
+    cid = c.current_conv()
+    mid = c.component(args.msg_id, "message id")
+    with c.lock(c.conv_dir(cid) / ".send.lock"):
+        c.ensure_index_locked(cid)
+        targets = c._targets_locked(cid)
+        record = c.load_message(cid, mid)
+        if not c.visible(record):
+            c.fail("message not found", "message_not_found")
+        if record["sender"] != c.WHO:
+            c.fail("only the sender can retract message " + mid, "not_sender")
+        if record.get("retracts"):
+            c.fail("a retraction notification cannot be retracted",
+                   "retraction_not_retractable")
+        existing = targets.get(mid)
+        if existing is not None:
+            # Idempotent: report the event that already exists, consume nothing.
+            event = c.load_message(cid, existing)
+            c.out({"ok": True, "msg_id": existing, "retracts": mid,
+                   "target_seq": record["seq"], "created": event["created"],
+                   "already": True})
+            return
+        seq = c.next_sequence(cid)
+        meta = {"seq": seq, "sender": c.WHO, "created": time.time(),
+                "to": record.get("to", []), "reply_to": None, "task_id": None,
+                "attachments": [], "retracts": mid}
+        content = c.WHO + " recalled a message #" + str(record["seq"])
+        event_id = c.publish_message(cid, meta, content)
+    c.out({"ok": True, "msg_id": event_id, "retracts": mid,
+           "target_seq": record["seq"], "created": meta["created"], "already": False})
 
 
 def cmd_receipts(args):
@@ -261,8 +313,11 @@ def cmd_receipts(args):
     participants = c.load_json(c.conv_dir(cid) / "meta.json")["participants"]
     recipients = record.get("to") or participants
     acked = [who for who in recipients if who != record["sender"] and c.has_stamp(cid, args.msg_id, who)]
-    pending = [who for who in recipients if who != record["sender"] and who not in acked]
-    c.out({"ok": True, "msg_id": args.msg_id, "acked_by": acked, "pending": pending})
+    ack_required = not record.get("retracts") and not record.get("retracted")
+    pending = [who for who in recipients if who != record["sender"] and who not in acked] if ack_required else []
+    c.out({"ok": True, "msg_id": args.msg_id, "acked_by": acked, "pending": pending,
+           "ack_required": ack_required, "retracted": record.get("retracted", False),
+           "retracts": record.get("retracts")})
 
 
 def cmd_convs(args):
@@ -275,16 +330,16 @@ def cmd_wait(args):
     cid = c.current_conv()
     deadline = time.monotonic() + args.timeout
     while True:
-        msgs = c.messages(cid, unread=True, after_seq=args.after_seq, limit=args.limit)
+        # Only messages this identity has not been shown wake the wait; older
+        # pending work must not return immediately. Unless explicitly filtered,
+        # include unseen messages that arrived before the call as well.
+        msgs = c.messages(cid, mode="unseen", after_seq=args.after_seq, limit=args.limit)
         if msgs:
-            c.out({"ok": True, "count": len(msgs), "messages": msgs,
-                   "next_after_seq": msgs[-1]["seq"]})
-            if args.ack:
-                c.stamp_many(cid, [m["msg_id"] for m in msgs], c.WHO)
+            output_page(cid, msgs, args.after_seq, ack=args.ack)
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            c.out({"ok": True, "count": 0, "messages": [], "next_after_seq": args.after_seq})
+            output_page(cid, [], args.after_seq)
             return
         time.sleep(min(0.2, remaining))
 

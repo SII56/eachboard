@@ -180,19 +180,13 @@ def _journal_ids(raw):
     return {component(row.decode("ascii"), "message id") for row in rows if row}
 
 
-def acknowledged(cid, who):
-    who = identity(who)
-    path = state_dir(cid) / (who + ".read")
+def _journal_read(path):
     return _journal_ids(path.read_bytes()) if path.exists() else set()
 
 
-def stamp_many(cid, mids, who):
-    who = identity(who)
-    directory = state_dir(cid)
-    directory.mkdir(parents=True, exist_ok=True)
-    with lock(directory / (who + ".lock")):
-        path = directory / (who + ".read")
-        known = acknowledged(cid, who)
+def _journal_append(path, lock_path, mids):
+    with lock(lock_path):
+        known = _journal_read(path)
         pending = [component(mid, "message id") for mid in dict.fromkeys(mids) if mid not in known]
         if not pending:
             return
@@ -207,12 +201,50 @@ def stamp_many(cid, mids, who):
             os.fsync(stream.fileno())
 
 
+def acknowledged(cid, who):
+    who = identity(who)
+    return _journal_read(state_dir(cid) / (who + ".read"))
+
+
+def stamp_many(cid, mids, who):
+    who = identity(who)
+    mids = [component(mid, "message id") for mid in dict.fromkeys(mids)]
+    seen = seen_messages(cid, who)
+    for mid in mids:
+        if mid not in seen:
+            fail("message " + mid + " has not been displayed; run python3 eachboard.py read"
+                 " or show " + mid + " before acknowledging it", "message_not_seen")
+    directory = state_dir(cid)
+    directory.mkdir(parents=True, exist_ok=True)
+    _journal_append(directory / (who + ".read"), directory / (who + ".lock"), mids)
+
+
 def stamp(cid, mid, who):
     stamp_many(cid, [mid], who)
 
 
 def has_stamp(cid, mid, who):
     return mid in acknowledged(cid, who)
+
+
+def seen_messages(cid, who):
+    who = identity(who)
+    return _journal_read(state_dir(cid) / (who + ".seen"))
+
+
+def mark_seen_many(cid, mids, who):
+    who = identity(who)
+    directory = state_dir(cid)
+    directory.mkdir(parents=True, exist_ok=True)
+    _journal_append(directory / (who + ".seen"), directory / (who + ".seen.lock"), mids)
+
+
+def mark_seen(cid, mid, who):
+    mark_seen_many(cid, [mid], who)
+
+
+def has_seen(cid, mid, who):
+    return mid in seen_messages(cid, who)
 
 
 def project_path(value, must_exist=True):
@@ -228,11 +260,13 @@ def project_path(value, must_exist=True):
 
 
 # Fixed-size entries permit binary search by sequence without loading the index.
-INDEX_MAGIC = b"EACHIDX1"
+INDEX_MAGIC = b"EACHIDX2"
 INDEX_HEADER_SIZE = len(INDEX_MAGIC) + 8
 INDEX_EMPTY = INDEX_MAGIC + bytes(8)
-# sequence, 32-byte SHA256 of the sender identity, NUL-padded message ID
-INDEX_RECORD = struct.Struct(">Q32s128s")
+# sequence, 32-byte SHA256 of the sender identity, NUL-padded message ID,
+# NUL-padded retraction target (empty for ordinary messages and notifications
+# only fill it, so a single index pass yields the target -> event mapping)
+INDEX_RECORD = struct.Struct(">Q32s128s128s")
 
 
 def message_path(cid, mid):
@@ -285,7 +319,8 @@ def _rebuild_index(cid):
             stream.write(INDEX_MAGIC + struct.pack(">Q", len(entries)))
             for r in entries:
                 stream.write(INDEX_RECORD.pack(r["seq"], sender_digest(r["sender"]),
-                                               r["msg_id"].encode("ascii")))
+                                               r["msg_id"].encode("ascii"),
+                                               (r.get("retracts") or "").encode("ascii")))
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, path)
@@ -309,22 +344,24 @@ def index_entries(path, after_seq=0):
         while low < high:
             middle = (low + high) // 2
             stream.seek(INDEX_HEADER_SIZE + middle * INDEX_RECORD.size)
-            seq, _, _ = INDEX_RECORD.unpack(stream.read(INDEX_RECORD.size))
+            seq = INDEX_RECORD.unpack(stream.read(INDEX_RECORD.size))[0]
             if seq <= after_seq:
                 low = middle + 1
             else:
                 high = middle
         stream.seek(INDEX_HEADER_SIZE + low * INDEX_RECORD.size)
         for _ in range(low, count):
-            seq, digest, mid = INDEX_RECORD.unpack(stream.read(INDEX_RECORD.size))
-            yield seq, digest, mid.rstrip(b"\0").decode("ascii")
+            seq, digest, mid, target = INDEX_RECORD.unpack(stream.read(INDEX_RECORD.size))
+            yield (seq, digest, mid.rstrip(b"\0").decode("ascii"),
+                   target.rstrip(b"\0").decode("ascii"))
 
 
-def append_index(cid, seq, mid, digest):
+def append_index(cid, seq, mid, digest, target=""):
     with (conv_dir(cid) / "index").open("r+b") as stream:
         stream.seek(0, os.SEEK_END)
         count = (stream.tell() - INDEX_HEADER_SIZE) // INDEX_RECORD.size
-        stream.write(INDEX_RECORD.pack(seq, digest, mid.encode("ascii")))
+        stream.write(INDEX_RECORD.pack(seq, digest, mid.encode("ascii"),
+                                       target.encode("ascii")))
         stream.seek(len(INDEX_MAGIC))
         stream.write(struct.pack(">Q", count + 1))
         stream.flush()
@@ -339,36 +376,134 @@ def load_message(cid, mid, seq=None):
     validate_object(data)
     if "seq" not in data:
         if seq is None:
-            seq = next((s for s, _, m in index_entries(conv_dir(cid) / "index") if m == mid), None)
+            seq = next((s for s, _, m, _t in index_entries(conv_dir(cid) / "index") if m == mid), None)
         data["seq"] = seq
     if data.get("msg_id") != mid:
         fail("message id mismatch", "corrupt_data")
     return {"msg_id": mid, "seq": data["seq"], "sender": data["sender"],
             "created": data["created"], "to": data.get("to", []),
             "reply_to": data.get("reply_to"), "task_id": data.get("task_id"),
-            "attachments": data.get("attachments", []), "content": data["content"]}
+            "attachments": data.get("attachments", []), "content": data["content"],
+            "retracts": data.get("retracts")}
 
 
 def visible(record):
     return not record.get("to") or WHO == record["sender"] or WHO in record["to"]
 
 
-def messages(cid, unread=False, after_seq=0, limit=100):
+def _targets_locked(cid):
+    """target message id -> retraction event id, built from the index alone.
+
+    The caller must hold the conversation send lock. One pass over the index
+    replaces any scan of message bodies, so the cost stays linear in the number
+    of messages and independent of how many of them are displayed.
+    """
+    targets = {}
+    for _seq, _digest, mid, target in index_entries(conv_dir(cid) / "index", 0):
+        if target:
+            targets.setdefault(target, mid)
+    return targets
+
+
+def project(cid, record, targets, force=False):
+    """Display form of a record.
+
+    A retracted message keeps its id, sequence, sender and recipients, but its
+    body and attachment list become a placeholder unless force is set.
+    retraction_id is the retraction event, retracted_by is the identity that
+    performed it, retracted_at is when that event was created.
+    """
+    out = dict(record)
+    event_id = targets.get(record["msg_id"])
+    if event_id is None:
+        out["retracted"] = False
+        return out
+    event = load_message(cid, event_id)
+    out["retracted"] = True
+    out["retraction_id"] = event_id
+    out["retracted_by"] = event["sender"]
+    out["retracted_at"] = event["created"]
+    if not force:
+        out["content"] = "[retracted]"
+        out["attachments"] = []
+    return out
+
+
+def messages(cid, mode="all", after_seq=0, limit=100, force=False):
+    """Visible messages in sequence order, already projected for display.
+
+    mode "all" returns history including the caller's own messages. "unseen"
+    returns ordinary messages that have not been displayed plus retraction
+    notifications that have not been displayed; a retracted original is never
+    new work. "pending" returns ordinary messages that have not been
+    acknowledged; retracted originals and retraction notifications are never
+    pending work. Displaying a message does not acknowledge it.
+    """
+    if mode not in ("all", "unseen", "pending"):
+        fail("invalid message filter", "invalid_request")
     result = []
     with lock(conv_dir(cid) / ".send.lock"):
         path = ensure_index_locked(cid)
-        known = acknowledged(cid, WHO) if unread else set()
+        targets = _targets_locked(cid)
+        if mode == "unseen":
+            skip = seen_messages(cid, WHO)
+        elif mode == "pending":
+            skip = acknowledged(cid, WHO)
+        else:
+            skip = set()
         mine = sender_digest(WHO)
-        for seq, digest, mid in index_entries(path, after_seq):
-            if unread and (mid in known or digest == mine):
+        for seq, digest, mid, target in index_entries(path, after_seq):
+            if mode != "all" and (digest == mine or mid in skip):
                 continue
-            r = load_message(cid, mid, seq)
-            if not visible(r):
+            if mode == "unseen" and mid in targets:
                 continue
-            result.append(r)
+            if mode == "pending" and (target or mid in targets):
+                continue
+            record = load_message(cid, mid, seq)
+            if not visible(record):
+                continue
+            result.append(project(cid, record, targets, force))
             if len(result) >= limit:
                 break
     return result
+
+
+def counts(cid):
+    """unseen and pending totals for the current identity, whole conversation.
+
+    Records neither seen nor acknowledged state. Completed messages, the
+    caller's own messages and retracted originals are skipped using the index,
+    before any body is loaded. A retraction notification counts as new work but
+    never as pending work. The two numbers are counted independently.
+    """
+    mine = sender_digest(WHO)
+    unseen = 0
+    pending = 0
+    with lock(conv_dir(cid) / ".send.lock"):
+        path = ensure_index_locked(cid)
+        targets = _targets_locked(cid)
+        seen = seen_messages(cid, WHO)
+        acked = acknowledged(cid, WHO)
+        for seq, digest, mid, target in index_entries(path, 0):
+            if digest == mine or mid in targets:
+                continue
+            if target:
+                if mid in seen:
+                    continue
+                record = load_message(cid, mid, seq)
+                if visible(record):
+                    unseen += 1
+                continue
+            if mid in seen and mid in acked:
+                continue
+            record = load_message(cid, mid, seq)
+            if not visible(record):
+                continue
+            if mid not in seen:
+                unseen += 1
+            if mid not in acked:
+                pending += 1
+    return {"unseen": unseen, "pending": pending}
 
 
 def index_entries_reverse(path):
@@ -376,36 +511,40 @@ def index_entries_reverse(path):
         count = (path.stat().st_size - INDEX_HEADER_SIZE) // INDEX_RECORD.size
         for index in range(count - 1, -1, -1):
             stream.seek(INDEX_HEADER_SIZE + index * INDEX_RECORD.size)
-            seq, digest, mid = INDEX_RECORD.unpack(stream.read(INDEX_RECORD.size))
-            yield seq, digest, mid.rstrip(b"\0").decode("ascii")
+            seq, digest, mid, target = INDEX_RECORD.unpack(stream.read(INDEX_RECORD.size))
+            yield (seq, digest, mid.rstrip(b"\0").decode("ascii"),
+                   target.rstrip(b"\0").decode("ascii"))
 
 
-def messages_latest(cid, limit=50):
+def messages_latest(cid, limit=50, force=False):
     # Return the newest visible messages in ascending sequence order.
     result = []
     with lock(conv_dir(cid) / ".send.lock"):
         path = ensure_index_locked(cid)
-        for seq, digest, mid in index_entries_reverse(path):
+        targets = _targets_locked(cid)
+        for seq, digest, mid, target in index_entries_reverse(path):
             record = load_message(cid, mid, seq)
             if visible(record):
-                result.append(record)
+                result.append(project(cid, record, targets, force))
             if len(result) >= limit:
                 break
     result.reverse()
     return result
 
 
-def first_unread_locked(cid):
-    """First visible, unconfirmed message from another identity.
+def first_unseen_locked(cid):
+    """First visible message from another identity that this identity has not seen.
 
     The caller must hold the conversation send lock; this helper never takes it.
-    Bodies are loaded only until the first pending visible message is found.
+    A retracted original no longer blocks, while an unseen retraction
+    notification does. Bodies are loaded only until the first match is found.
     """
     path = ensure_index_locked(cid)
-    known = acknowledged(cid, WHO)
+    targets = _targets_locked(cid)
+    known = seen_messages(cid, WHO)
     mine = sender_digest(WHO)
-    for seq, digest, mid in index_entries(path, 0):
-        if mid in known or digest == mine:
+    for seq, digest, mid, target in index_entries(path, 0):
+        if mid in known or digest == mine or mid in targets:
             continue
         record = load_message(cid, mid, seq)
         if visible(record):
@@ -413,13 +552,22 @@ def first_unread_locked(cid):
     return None
 
 
-def get_message(cid, mid):
+def get_messages_locked(cid, mids, force=False):
+    """Resolve a batch against one retraction snapshot; caller holds the send lock."""
+    targets = _targets_locked(cid)
+    result = []
+    for mid in mids:
+        record = load_message(cid, mid)
+        if not visible(record):
+            fail("message not found", "message_not_found")
+        result.append(project(cid, record, targets, force))
+    return result
+
+
+def get_message(cid, mid, force=False):
     with lock(conv_dir(cid) / ".send.lock"):
         ensure_index_locked(cid)
-        record = load_message(cid, mid)
-        if visible(record):
-            return record
-    fail("message not found", "message_not_found")
+        return get_messages_locked(cid, [mid], force)[0]
 
 
 def records(cid):
@@ -454,6 +602,7 @@ def publish_message(cid, meta, content):
     payload = {**meta, "content": content}
     mid = "m" + sha(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     write_json(message_path(cid, mid), {"msg_id": mid, **payload})
-    append_index(cid, meta["seq"], mid, sender_digest(meta["sender"]))
+    append_index(cid, meta["seq"], mid, sender_digest(meta["sender"]),
+                 meta.get("retracts") or "")
     (conv_dir(cid) / ".index-dirty").unlink()
     return mid

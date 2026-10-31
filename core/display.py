@@ -13,6 +13,10 @@ LABELS = {
     'environment': 'Environment', 'conversation': 'Conversation', 'identity': 'Identity',
     'authorized': 'Authorized', 'key_present': 'Key present', 'exists': 'Exists',
     'source': 'Source', 'config': 'config.json', 'id': 'ID', 'warnings': 'Warnings',
+    'unseen': 'Unseen', 'pending': 'Pending',
+    'retracts': 'Retracts', 'retracted': 'Retracted',
+    'retraction_id': 'Retraction', 'retracted_by': 'Retracted by',
+    'retracted_at': 'Retracted at',
 }
 
 
@@ -28,8 +32,14 @@ def message_text(message):
         if m.get(key):
             value = ', '.join(m[key]) if isinstance(m[key], list) else m[key]
             context.append(LABELS[key] + ': ' + str(value))
+    if m.get('retracts'):
+        context.append(LABELS['retracts'] + ': ' + str(m['retracts']))
     if context:
         lines.append(' | '.join(context))
+    if m.get('retracted'):
+        lines.append('Status: retracted by ' + str(m.get('retracted_by')) + ' (event '
+                     + str(m.get('retraction_id')) + ', '
+                     + timestamp(m.get('retracted_at')) + ')')
     lines.append(m['content'])
     for attachment in m.get('attachments', []):
         lines.append('Attachment: ' + fields_text(attachment))
@@ -68,6 +78,10 @@ def render(data):
     if 'acked' in data:
         return 'Acknowledged: ' + ', '.join(data['acked'])
     if 'acked_by' in data:
+        if data.get('ack_required') is False:
+            return 'Message ID: {}\nAcknowledged: {}\nAcknowledgement: not required{}'.format(
+                data['msg_id'], ', '.join(data['acked_by']) or 'none',
+                ' (message retracted)' if data.get('retracted') else ' (read-only notification)')
         return 'Message ID: {}\nAcknowledged: {}\nPending: {}'.format(
             data['msg_id'], ', '.join(data['acked_by']) or 'none', ', '.join(data['pending']) or 'none')
     if 'conversations' in data:

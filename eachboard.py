@@ -4,9 +4,9 @@ import argparse
 import json
 import sys
 from core import common as c
-from commands import (cmd_open, cmd_send, cmd_unread, cmd_read, cmd_convs,
+from commands import (cmd_open, cmd_send, cmd_read, cmd_convs,
                       cmd_list, cmd_wait, cmd_upload, cmd_download, cmd_ack,
-                      cmd_status, cmd_show, cmd_receipts, cmd_init, cmd_doctor)
+                      cmd_status, cmd_show, cmd_retract, cmd_receipts, cmd_init, cmd_doctor)
 
 
 class Parser(argparse.ArgumentParser):
@@ -48,25 +48,38 @@ def main():
     sp.add_argument("--task-id")
     sp.add_argument("--attachment", action="append", default=[])
     sp.set_defaults(fn=cmd_send)
-    for name, fn in [("unread", cmd_unread), ("read", cmd_read), ("peek", cmd_read),
-                     ("list", cmd_list), ("wait", cmd_wait)]:
-        sp = sub.add_parser(name)
+    for name, fn, summary in [
+        ("read", cmd_read, "display new messages; use --pending to revisit unfinished work"),
+        ("list", cmd_list, "display message history, including your own messages"),
+        ("wait", cmd_wait, "wait for new messages, then display them"),
+    ]:
+        sp = sub.add_parser(name, help=summary, description=summary)
         listed = name == "list"
         sp.add_argument("--limit", type=positive, default=50 if listed else 100)
         sp.add_argument("--after-seq", type=nonnegative, default=None if listed else 0,
                         help="only return messages with a greater sequence; list defaults to the newest page")
         if name in ("read", "wait"):
-            sp.add_argument("--ack", action="store_true", help="also mark returned messages read (explicit ack recommended)")
+            sp.add_argument("--ack", action="store_true", help="also acknowledge the returned messages (explicit ack recommended)")
+        if name == "read":
+            sp.add_argument("--pending", action="store_true",
+                            help="show messages not yet acknowledged instead of new ones")
         if name == "wait":
             sp.add_argument("--timeout", type=nonnegative, default=60)
         sp.set_defaults(fn=fn)
-    sp = sub.add_parser("ack")
+    sp = sub.add_parser("ack", help="acknowledge messages already displayed to you")
     sp.add_argument("msg_ids", nargs="+")
     sp.set_defaults(fn=cmd_ack)
-    for name, fn in [("show", cmd_show), ("receipts", cmd_receipts)]:
-        sp = sub.add_parser(name)
-        sp.add_argument("msg_id")
-        sp.set_defaults(fn=fn)
+    sp = sub.add_parser("show")
+    sp.add_argument("msg_id")
+    sp.add_argument("--force", action="store_true",
+                    help="show the original body of a retracted message")
+    sp.set_defaults(fn=cmd_show)
+    sp = sub.add_parser("receipts")
+    sp.add_argument("msg_id")
+    sp.set_defaults(fn=cmd_receipts)
+    sp = sub.add_parser("retract")
+    sp.add_argument("msg_id")
+    sp.set_defaults(fn=cmd_retract)
     sub.add_parser("convs").set_defaults(fn=cmd_convs)
     sub.add_parser("status").set_defaults(fn=cmd_status)
     sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
