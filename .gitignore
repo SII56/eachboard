@@ -7,3 +7,7 @@ board/
 .board/
 
 .eachboard/
+*.egg-info/
+build/
+dist/
+.venv/
