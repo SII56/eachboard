@@ -45,8 +45,8 @@ class BoardContext:
             self.store.fail('administrator can open and inspect conversations, but cannot send, ack, retract or wait;'
                             ' use list/show/read for inspection', 'admin_read_only')
 
-    def authenticate_admin(self, create=False):
-        """Only open may establish the project password on first use."""
+    def authenticate_admin(self):
+        """Authenticate an injected administrator identity for inspection."""
         self.store.is_admin = False
         if self.root is None:
             self.store.fail('no .eachboard project found from ' + str(self.cwd), 'project_not_found')
@@ -56,16 +56,24 @@ class BoardContext:
                             'missing_credentials')
         if not self.is_admin:
             self.store.fail('administrator identity required', 'unauthorized')
+        self.verify_admin_password(self.key)
+        self.store.is_admin = True
+
+    def verify_admin_password(self, password, create=False, confirm=None):
+        """Verify the password independently of the calling participant identity."""
+        if not password:
+            self.store.fail('administrator password must not be empty')
         path = self.root / 'admin.hash'
         with self.store.lock(self.root / '.admin.lock'):
             if not path.exists():
                 if not create:
                     self.store.fail('administrator password has not been established; run open first',
                                     'unauthorized')
-                self.store.atomic_write(path, self.store.sha(self.key))
-            if not hmac.compare_digest(self.store.sha(self.key), path.read_text(encoding='ascii')):
+                if confirm is not None and confirm() != password:
+                    self.store.fail('administrator password confirmation does not match')
+                self.store.atomic_write(path, self.store.sha(password))
+            if not hmac.compare_digest(self.store.sha(password), path.read_text(encoding='ascii')):
                 self.store.fail('administrator password rejected', 'unauthorized')
-        self.store.is_admin = True
 
     def out(self, obj):
         text = (json.dumps(obj, ensure_ascii=False) if self.json_output else

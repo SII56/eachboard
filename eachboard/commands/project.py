@@ -1,6 +1,8 @@
 """Project command handlers; each receives an explicit context."""
 import hmac
+import getpass
 import secrets
+import sys
 import time
 from pathlib import Path
 from ..errors import EachboardError
@@ -36,7 +38,19 @@ def cmd_open(ctx, args):
         ctx.store.fail("duplicate participants")
     if 'admin' in participants:
         ctx.store.fail("admin is reserved for the project administrator")
-    ctx.authenticate_admin(create=True)
+    if sys.stdin.isatty():
+        # Opening is authorized by the password, independent of agent credentials
+        # already exported in this terminal. Never mistake an agent key for it.
+        password = getpass.getpass('admin password: ')
+        ctx.verify_admin_password(password, create=True,
+                                  confirm=lambda: getpass.getpass('confirm: '))
+    elif ctx.is_admin and ctx.key:
+        # Optional automation path; interactive users need no identity exports.
+        ctx.verify_admin_password(ctx.key, create=True)
+    else:
+        ctx.store.fail('open requires a terminal to enter the administrator password; for noninteractive use,'
+                       ' set EACHBOARD_WHO=admin and EACHBOARD_KEY to the administrator password',
+                       'missing_credentials')
     cid = secrets.token_hex(8)
     keys = {p: secrets.token_urlsafe(24) for p in participants}
     with ctx.store.publishing(ctx.root / "conversations", cid) as d:
