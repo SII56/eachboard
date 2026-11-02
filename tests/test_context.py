@@ -74,7 +74,7 @@ class ContextTests(BoardTestCase):
         alternate = self.base / 'alternate'
         alternate.mkdir()
         # Relative init paths use the explicit execution directory.
-        self.invoke(BoardContext(self.env, alternate), 'init')
+        self.invoke(BoardContext(self.admin_env(), alternate), 'init')
         opened = self.invoke(BoardContext(self.admin_env(), alternate), 'open', '--participants', 'writer,reviewer')
         env = dict(self.env, EACHBOARD_WHO='writer', EACHBOARD_KEY=opened['keys']['writer'])
         other = BoardContext(env, alternate)

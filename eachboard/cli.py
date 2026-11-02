@@ -33,9 +33,9 @@ def positive(value):
 
 def build_parser():
     p = Parser(prog="python3 -m eachboard", description=__doc__,
-               epilog="Open prompts for the administrator password; first open sets and confirms it."
-                      " Inject EACHBOARD_WHO=admin and EACHBOARD_KEY=<administrator password> to inspect"
-                      " all conversations or open noninteractively."
+               epilog="Init sets or generates an administrator key. Commands require EACHBOARD_KEY."
+                      " Inject the administrator key as EACHBOARD_KEY to open or inspect"
+                      " all conversations. Identity is resolved from the key."
                       " EACHBOARD_CONV selects a conversation; otherwise HEAD is used."
                       " Administrator viewing never marks participant messages seen or acknowledged.")
     p.add_argument("--json", action="store_true", help="return structured JSON instead of readable text")
@@ -43,7 +43,7 @@ def build_parser():
     sp = sub.add_parser("init")
     sp.add_argument("path", nargs="?", default=".")
     sp.set_defaults(fn=cmd_init)
-    sp = sub.add_parser("open", description="Enter the administrator password to create a conversation; first open sets and confirms it. No identity exports are required in a terminal.")
+    sp = sub.add_parser("open", description="Create a conversation using the administrator EACHBOARD_KEY established by init.")
     sp.add_argument("--participants", required=True)
     sp.set_defaults(fn=cmd_open)
     sp = sub.add_parser("send")

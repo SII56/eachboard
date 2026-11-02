@@ -27,7 +27,7 @@ class BoardContext:
                             'project discovery' if found is not None else 'not found')
         self.conv = self.environ.get('EACHBOARD_CONV')
         self.conv_source = None
-        self.who = self.environ.get('EACHBOARD_WHO')
+        self.who = None
         self.key = self.environ.get('EACHBOARD_KEY')
         self.json_output = json_output
         self.store = MessageStore(self.root, self.who)
@@ -45,35 +45,37 @@ class BoardContext:
             self.store.fail('administrator can open and inspect conversations, but cannot send, ack, retract or wait;'
                             ' use list/show/read for inspection', 'admin_read_only')
 
-    def authenticate_admin(self):
-        """Authenticate an injected administrator identity for inspection."""
+    def resolve_identity(self, cid=None, admin_only=False, metadata=None):
+        """Resolve a key inside this project; never trust a caller-supplied name."""
+        self.who = self.store.who = None
         self.store.is_admin = False
         if self.root is None:
             self.store.fail('no .eachboard project found from ' + str(self.cwd), 'project_not_found')
         self.store.verify_format()
-        if not self.who or not self.key:
-            self.store.fail('set EACHBOARD_WHO=admin and EACHBOARD_KEY to the administrator password',
-                            'missing_credentials')
-        if not self.is_admin:
-            self.store.fail('administrator identity required', 'unauthorized')
-        self.verify_admin_password(self.key)
-        self.store.is_admin = True
+        if not self.key:
+            self.store.fail('set EACHBOARD_KEY in the invoking environment', 'missing_credentials')
+        digest = self.store.sha(self.key)
+        admin = self.root / 'admin.hash'
+        if not admin.is_file():
+            self.store.fail('administrator key is missing; initialize a new project', 'invalid_data')
+        if hmac.compare_digest(digest, admin.read_text(encoding='ascii')):
+            self.who = self.store.who = 'admin'
+            self.store.is_admin = True
+            return self.who
+        if admin_only:
+            self.store.fail('administrator key required', 'unauthorized')
+        keys = (metadata if metadata is not None else self.store.read_metadata(cid))['keys']
+        matches = [name for name, hashed in keys.items() if hmac.compare_digest(digest, hashed)]
+        if len(matches) > 1:
+            self.store.fail('ambiguous participant key in conversation metadata', 'invalid_data')
+        if not matches:
+            self.store.fail('key rejected for the selected conversation; check EACHBOARD_KEY and EACHBOARD_CONV',
+                            'unauthorized')
+        self.who = self.store.who = matches[0]
+        return self.who
 
-    def verify_admin_password(self, password, create=False, confirm=None):
-        """Verify the password independently of the calling participant identity."""
-        if not password:
-            self.store.fail('administrator password must not be empty')
-        path = self.root / 'admin.hash'
-        with self.store.lock(self.root / '.admin.lock'):
-            if not path.exists():
-                if not create:
-                    self.store.fail('administrator password has not been established; run open first',
-                                    'unauthorized')
-                if confirm is not None and confirm() != password:
-                    self.store.fail('administrator password confirmation does not match')
-                self.store.atomic_write(path, self.store.sha(password))
-            if not hmac.compare_digest(self.store.sha(password), path.read_text(encoding='ascii')):
-                self.store.fail('administrator password rejected', 'unauthorized')
+    def authenticate_admin(self):
+        self.resolve_identity(admin_only=True)
 
     def out(self, obj):
         text = (json.dumps(obj, ensure_ascii=False) if self.json_output else
@@ -81,6 +83,7 @@ class BoardContext:
         print(text, flush=True)
 
     def current_conv(self):
+        self.who = self.store.who = None
         self.store.is_admin = False
         if self.root is None:
             self.store.fail("no .eachboard project found from " + str(self.cwd)
@@ -90,25 +93,19 @@ class BoardContext:
         explicit = (self.environ.get('EACHBOARD_CONV') or '').strip()
         self.conv = explicit or self.store.read_head()
         self.conv_source = 'EACHBOARD_CONV environment' if explicit else 'HEAD'
-        if not self.key or not self.who:
-            self.store.fail("EACHBOARD_WHO and EACHBOARD_KEY must both be set in the invoking environment;"
+        if not self.key:
+            self.store.fail("EACHBOARD_KEY must be set in the invoking environment;"
                  " run python3 -m eachboard doctor for the selected root and conversation", "missing_credentials")
         if not self.conv:
             self.store.fail("no active conversation in " + str(self.root)
                  + "; set EACHBOARD_CONV or run python3 -m eachboard open; run python3 -m eachboard doctor for context",
                  "missing_credentials")
-        self.store.identity(self.who)
         source = self.conv_source
-        if self.is_admin:
-            self.authenticate_admin()
         path = self.store.conv_dir(self.conv) / "meta"
         if not path.is_file():
             self.store.fail("conversation " + str(self.conv) + " not found in " + str(self.root)
                  + " (selected by " + source + "); check EACHBOARD_CONV or run python3 -m eachboard doctor",
                  "conversation_not_found")
         meta = self.store.read_metadata(self.conv)
-        if not self.is_admin and not hmac.compare_digest(self.store.sha(self.key), meta["keys"].get(self.who, "")):
-            self.store.fail("key rejected for " + str(self.who) + " in conversation " + str(self.conv)
-                 + " (" + str(self.root) + ", selected by " + source + "); check EACHBOARD_KEY or run python3 -m eachboard doctor",
-                 "unauthorized")
+        self.resolve_identity(self.conv, metadata=meta)
         return self.conv

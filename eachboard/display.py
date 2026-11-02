@@ -3,6 +3,7 @@ import time
 
 
 LABELS = {
+    'admin_key': 'Admin key (save now)', 'note': 'Note',
     'conv_id': 'Conversation', 'who': 'Identity', 'root': 'Data directory', 'workspace': 'Workspace',
     'participants': 'Participants', 'msg_id': 'Message ID',
     'seq': 'Sequence', 'sender': 'Sender', 'created': 'Time', 'to': 'To',

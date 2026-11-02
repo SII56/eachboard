@@ -86,10 +86,10 @@ class AdminTests(BoardTestCase):
     def test_admin_is_reserved_and_participant_cannot_open(self):
         before = self.state()
         self.run_eachboard('open', '--participants', 'admin,writer', error='invalid_request')
-        self.run_eachboard('open', '--participants', 'new,peer', who='writer', error='missing_credentials')
+        self.run_eachboard('open', '--participants', 'new,peer', who='writer', error='unauthorized')
         self.assertEqual(self.state(), before)
 
-    def test_first_open_establishes_injected_password_without_json_or_plaintext(self):
+    def test_init_establishes_key_without_json_or_plaintext(self):
         workspace = self.base / 'fresh'
         workspace.mkdir()
         self.cwd = workspace
@@ -98,7 +98,7 @@ class AdminTests(BoardTestCase):
         # The obsolete admin variable alone is not authentication.
         old = dict(self.env, EACHBOARD_ADMIN_CODE='obsolete')
         self.run_eachboard('open', '--participants', 'a,b', env=old, error='missing_credentials')
-        self.assertFalse((root / 'admin.hash').exists())
+        self.assertTrue((root / 'admin.hash').exists())
         opened = self.run_eachboard('open', '--participants', 'a,b')
         self.assertEqual((root / 'HEAD').read_text().strip(), opened['conv_id'])
         self.assertEqual(len((root / 'admin.hash').read_text()), 64)
@@ -120,5 +120,5 @@ class AdminTests(BoardTestCase):
         workspace.mkdir()
         self.cwd = workspace
         self.run_eachboard('init')
-        self.run_eachboard('convs', env=self.admin_env(), error='unauthorized')
-        self.assertFalse((workspace / '.eachboard/admin.hash').exists())
+        self.assertEqual(self.run_eachboard('convs', env=self.admin_env())['conversations'], [])
+        self.assertTrue((workspace / '.eachboard/admin.hash').exists())

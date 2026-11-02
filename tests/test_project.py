@@ -201,7 +201,7 @@ class ProjectTests(BoardTestCase):
         self.assertNotIn(self.keys['reviewer'], text)
         partial = self.run_eachboard('doctor', env=dict(self.env))
         self.assertFalse(partial['identity']['key_present'])
-        self.assertTrue(any('EACHBOARD_WHO' in w for w in partial['warnings']))
+        self.assertTrue(any('EACHBOARD_KEY' in w for w in partial['warnings']))
         wrong = self.run_eachboard('doctor', env=dict(env, EACHBOARD_KEY='wrong'))
         self.assertFalse(wrong['identity']['authorized'])
         self.assertTrue(any('rejected' in w for w in wrong['warnings']))

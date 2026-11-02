@@ -17,15 +17,34 @@ def cmd_init(ctx, args):
     root = workspace / ".eachboard"
     if root.exists() or root.is_symlink():
         ctx.store.fail("eachboard already initialized", "already_exists")
+    generated = False
+    if sys.stdin.isatty():
+        key = getpass.getpass('Admin key (type your own, or press Enter to generate): ')
+        if key:
+            if getpass.getpass('Confirm admin key: ') != key:
+                ctx.store.fail('administrator key confirmation does not match')
+        else:
+            key = secrets.token_urlsafe(32)
+            generated = True
+    else:
+        key = ctx.environ.get('EACHBOARD_KEY')
+        if not key:
+            key = secrets.token_urlsafe(32)
+            generated = True
     with ctx.store.publishing(workspace, ".eachboard") as d:
         ctx.store.atomic_write(d / "FORMAT", FORMAT_MARKER)
         ctx.store.atomic_write(d / "HEAD", "")
+        ctx.store.atomic_write(d / "admin.hash", ctx.store.sha(key))
+        (d / ".admin.lock").touch(mode=0o600)
         (d / "conversations").mkdir(mode=0o700)
     ignore = workspace / ".gitignore"
     text = ignore.read_text() if ignore.exists() else ""
     if ".eachboard/" not in text.splitlines():
         ctx.store.atomic_write(ignore, text + ("\n" if text and not text.endswith("\n") else "") + ".eachboard/\n", mode=0o644)
-    ctx.out({"ok": True, "root": str(root), "workspace": str(workspace)})
+    result = {"ok": True, "root": str(root), "workspace": str(workspace)}
+    if generated:
+        result.update(admin_key=key, note='Save this admin key now; it will not be shown again.')
+    ctx.out(result)
 
 
 def cmd_open(ctx, args):
@@ -38,19 +57,7 @@ def cmd_open(ctx, args):
         ctx.store.fail("duplicate participants")
     if 'admin' in participants:
         ctx.store.fail("admin is reserved for the project administrator")
-    if sys.stdin.isatty():
-        # Opening is authorized by the password, independent of agent credentials
-        # already exported in this terminal. Never mistake an agent key for it.
-        password = getpass.getpass('admin password: ')
-        ctx.verify_admin_password(password, create=True,
-                                  confirm=lambda: getpass.getpass('confirm: '))
-    elif ctx.is_admin and ctx.key:
-        # Optional automation path; interactive users need no identity exports.
-        ctx.verify_admin_password(ctx.key, create=True)
-    else:
-        ctx.store.fail('open requires a terminal to enter the administrator password; for noninteractive use,'
-                       ' set EACHBOARD_WHO=admin and EACHBOARD_KEY to the administrator password',
-                       'missing_credentials')
+    ctx.authenticate_admin()
     cid = secrets.token_hex(8)
     keys = {p: secrets.token_urlsafe(24) for p in participants}
     with ctx.store.publishing(ctx.root / "conversations", cid) as d:
@@ -138,28 +145,24 @@ def cmd_doctor(ctx, args):
     else:
         warnings.append("no active conversation; run python3 -m eachboard open or set EACHBOARD_CONV")
 
-    have_who, have_key = bool(ctx.who), bool(ctx.key)
+    have_key = bool(ctx.key)
     authorized = None
-    if not have_who or not have_key:
-        warnings.append("EACHBOARD_WHO and EACHBOARD_KEY are not both set; authentication skipped")
-    elif ctx.is_admin and storage_supported:
+    ctx.who = ctx.store.who = None
+    ctx.store.is_admin = False
+    if not have_key:
+        warnings.append('EACHBOARD_KEY is not set; authentication skipped')
+    elif storage_supported:
         try:
-            authorized = hmac.compare_digest(ctx.store.sha(ctx.key),
-                                             (ctx.root / 'admin.hash').read_text(encoding='ascii'))
-        except (OSError, ValueError) as exc:
+            # Admin resolution is independent of HEAD; participant resolution
+            # requires the selected conversation to exist.
+            if conv_exists:
+                ctx.resolve_identity(cid)
+            else:
+                ctx.authenticate_admin()
+            authorized = True
+        except (EachboardError, OSError, ValueError) as exc:
             authorized = False
-            warnings.append('cannot verify administrator credentials: ' + str(exc))
-        if authorized is False:
-            warnings.append('administrator credentials rejected')
-    elif conv_exists:
-        try:
-            keys = ctx.store.read_metadata(cid).get("keys", {})
-            authorized = hmac.compare_digest(ctx.store.sha(ctx.key), keys.get(ctx.who, ""))
-        except (EachboardError, OSError, ValueError, TypeError) as exc:
-            authorized = False
-            warnings.append("cannot verify credentials: " + str(exc))
-        if authorized is False:
-            warnings.append("credentials rejected for " + str(ctx.who) + " in " + str(cid))
+            warnings.append('cannot verify credentials: ' + str(exc))
 
     ctx.out({
         "ok": True,
@@ -171,7 +174,6 @@ def cmd_doctor(ctx, args):
         "environment": {
             "EACHBOARD_ROOT": _env_flag(ctx, "EACHBOARD_ROOT"),
             "EACHBOARD_CONV": _env_flag(ctx, "EACHBOARD_CONV"),
-            "EACHBOARD_WHO": _env_flag(ctx, "EACHBOARD_WHO"),
             "EACHBOARD_KEY": _env_flag(ctx, "EACHBOARD_KEY"),
         },
         "conversation": {"id": cid, "source": conv_source, "exists": conv_exists,
@@ -183,6 +185,11 @@ def cmd_doctor(ctx, args):
 
 
 def cmd_convs(ctx, args):
+    try:
+        ctx.authenticate_admin()
+    except EachboardError as exc:
+        if exc.code != 'unauthorized':
+            raise
     if not ctx.is_admin:
         cid = ctx.current_conv()
         conversations = [{"conv_id": cid}]

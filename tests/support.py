@@ -28,13 +28,13 @@ class BoardTestCase(unittest.TestCase):
 
     def identity(self, who):
         return dict(self.env, EACHBOARD_ROOT=str(self.root), EACHBOARD_CONV=self.cid,
-                    EACHBOARD_WHO=who, EACHBOARD_KEY=self.keys[who])
+                    EACHBOARD_KEY=self.keys[who])
 
     def admin_env(self, **changes):
-        return dict(self.env, EACHBOARD_WHO="admin", EACHBOARD_KEY=self.admin_password, **changes)
+        return dict(self.env, EACHBOARD_KEY=self.admin_password, **changes)
 
     def run_eachboard(self, *args, who=None, error=None, env=None, stdin=None):
-        if env is None and who is None and args and args[0] == "open":
+        if env is None and who is None and args and args[0] in ("open", "init"):
             env = self.admin_env()
         p = subprocess.run([sys.executable, "-m", "eachboard", "--json", *args],
                            env=env or (self.identity(who) if who else self.env),
