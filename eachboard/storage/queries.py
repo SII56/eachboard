@@ -19,6 +19,17 @@ class MessageQueries:
                 targets.setdefault(target, mid)
         return targets
 
+    def task_of(self, cid, record):
+        """Task a record belongs to; a retraction notification follows its original.
+
+        Notifications carry no task header, so a task filter would otherwise drop
+        the news that a task message was withdrawn.
+        """
+        target = record.get("retracts")
+        if target:
+            return self.load_message(cid, target).get("task_id")
+        return record.get("task_id")
+
     def project(self, cid, record, targets, force=False):
         """Display form of a record.
 
@@ -41,7 +52,7 @@ class MessageQueries:
             out["content"] = "[retracted]"
         return out
 
-    def messages(self, cid, mode="all", after_seq=0, limit=100, force=False):
+    def messages(self, cid, mode="all", after_seq=0, limit=100, force=False, task_id=None):
         """Visible messages in sequence order, already projected for display.
 
         mode "all" returns history including the caller's own messages. "unseen"
@@ -49,7 +60,8 @@ class MessageQueries:
         notifications that have not been displayed; a retracted original is never
         new work. "pending" returns ordinary messages that have not been
         acknowledged; retracted originals and retraction notifications are never
-        pending work. Displaying a message does not acknowledge it.
+        pending work. Displaying a message does not acknowledge it. task_id keeps
+        only messages of that task, including notifications that retract one.
         """
         if mode not in ("all", "unseen", "pending"):
             self.fail("invalid message filter", "invalid_request")
@@ -73,6 +85,8 @@ class MessageQueries:
                     continue
                 record = self.load_message(cid, mid, seq)
                 if not self.visible(record):
+                    continue
+                if task_id is not None and self.task_of(cid, record) != task_id:
                     continue
                 result.append(self.project(cid, record, targets, force))
                 if len(result) >= limit:
@@ -116,7 +130,7 @@ class MessageQueries:
                     pending += 1
         return {"unseen": unseen, "pending": pending}
 
-    def messages_latest(self, cid, limit=50, force=False):
+    def messages_latest(self, cid, limit=50, force=False, task_id=None):
         # Return the newest visible messages in ascending sequence order.
         result = []
         with self.lock(self.conv_dir(cid) / ".send.lock"):
@@ -124,7 +138,7 @@ class MessageQueries:
             targets = self._targets_locked(cid)
             for seq, digest, mid, target in self.index_entries_reverse(path):
                 record = self.load_message(cid, mid, seq)
-                if self.visible(record):
+                if self.visible(record) and (task_id is None or self.task_of(cid, record) == task_id):
                     result.append(self.project(cid, record, targets, force))
                 if len(result) >= limit:
                     break

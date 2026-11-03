@@ -64,6 +64,11 @@ def output_page(ctx, cid, msgs, after_seq=0, ack=False):
                 ctx.store.stamp_many(cid, ackable, ctx.who)
 
 
+def task_filter(ctx, args):
+    task_id = getattr(args, "task_id", None)
+    return None if task_id is None else ctx.store.component(task_id, "task id")
+
+
 def cmd_read(ctx, args):
     # Default view: what has not been shown yet. --pending switches to the
     # older question "what have I not finished", which includes messages that
@@ -75,19 +80,22 @@ def cmd_read(ctx, args):
     mode = "pending" if getattr(args, "pending", False) else "unseen"
     if ctx.is_admin:
         mode = 'all'
-    msgs = ctx.store.messages(cid, mode=mode, after_seq=args.after_seq, limit=args.limit)
+    msgs = ctx.store.messages(cid, mode=mode, after_seq=args.after_seq, limit=args.limit,
+                              task_id=task_filter(ctx, args))
     output_page(ctx, cid, msgs, args.after_seq, ack=getattr(args, "ack", False))
 
 
 def cmd_list(ctx, args):
     cid = ctx.current_conv()
+    task_id = task_filter(ctx, args)
     if args.after_seq is None:
         # Default view: the newest messages, still shown in ascending order.
-        msgs = ctx.store.messages_latest(cid, limit=args.limit)
+        msgs = ctx.store.messages_latest(cid, limit=args.limit, task_id=task_id)
         cursor = 0
     else:
         # Explicit cursor (including 0) keeps forward pagination semantics.
-        msgs = ctx.store.messages(cid, mode="all", after_seq=args.after_seq, limit=args.limit)
+        msgs = ctx.store.messages(cid, mode="all", after_seq=args.after_seq, limit=args.limit,
+                                  task_id=task_id)
         cursor = args.after_seq
     output_page(ctx, cid, msgs, cursor)
 
@@ -175,12 +183,16 @@ def cmd_receipts(ctx, args):
 def cmd_wait(ctx, args):
     cid = ctx.current_conv()
     ctx.require_participant()
+    task_id = task_filter(ctx, args)
     deadline = time.monotonic() + args.timeout
     while True:
         # Only messages this identity has not been shown wake the wait; older
         # pending work must not return immediately. Unless explicitly filtered,
-        # include unseen messages that arrived before the call as well.
-        msgs = ctx.store.messages(cid, mode="unseen", after_seq=args.after_seq, limit=args.limit)
+        # include unseen messages that arrived before the call as well. A task
+        # filter only changes which messages wake and display; the send gate
+        # still covers the whole conversation.
+        msgs = ctx.store.messages(cid, mode="unseen", after_seq=args.after_seq, limit=args.limit,
+                                  task_id=task_id)
         if msgs:
             output_page(ctx, cid, msgs, args.after_seq, ack=args.ack)
             return

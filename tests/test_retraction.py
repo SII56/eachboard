@@ -319,3 +319,18 @@ else: raise AssertionError('expected failed output')
         self.assertIn('Displayed: reviewer', text)
         self.assertNotIn('Acknowledged:', text)
         self.assertIn('Acknowledgement: not required (read-only notification)', text)
+
+    def test_task_filter_includes_notifications_for_task_messages(self):
+        tagged = self.run_eachboard('send', 'task work', '--task-id', 'task-a', who='writer')
+        other = self.run_eachboard('send', 'other work', '--task-id', 'task-b', who='writer')
+        self.run_eachboard('read', who='reviewer')
+        event = self.retract(tagged['msg_id'])
+        self.retract(other['msg_id'])
+        page = self.run_eachboard('read', '--task-id', 'task-a', who='reviewer')
+        self.assertEqual([m['msg_id'] for m in page['messages']], [event['msg_id']])
+        self.assertEqual(self.run_eachboard('status', who='reviewer')['unseen'], 1)
+        waited = self.run_eachboard('wait', '--timeout', '0', '--task-id', 'task-b', who='reviewer')
+        self.assertEqual(waited['messages'][0]['retracts'], other['msg_id'])
+        history = self.run_eachboard('list', '--task-id', 'task-a', who='observer')['messages']
+        self.assertEqual([m['msg_id'] for m in history], [tagged['msg_id'], event['msg_id']])
+        self.assertEqual(history[0]['content'], '[retracted]')

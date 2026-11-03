@@ -634,3 +634,54 @@ print('bounded reads verified')
         receipts = self.run_eachboard("receipts", broadcast["msg_id"], env=admin)
         self.assertEqual(receipts["not_displayed"], ["reviewer", "observer"])
         self.assertNotIn("admin", receipts["displayed"] + receipts["acked_by"])
+
+    def task_send(self, content, task_id=None, **kwargs):
+        args = ["send", "--content", content] + (["--task-id", task_id] if task_id else [])
+        return self.run_eachboard(*args, who="writer", **kwargs)
+
+    def test_task_filter_marks_only_displayed_messages_seen(self):
+        a1 = self.task_send("a one", "task-a")
+        b1 = self.task_send("b one", "task-b")
+        plain = self.task_send("no task")
+        page = self.run_eachboard("read", "--task-id", "task-a", who="reviewer")
+        self.assertEqual([m["msg_id"] for m in page["messages"]], [a1["msg_id"]])
+        self.assertEqual(self.run_eachboard("status", who="reviewer")["unseen"], 2)
+        self.run_eachboard("send", "blocked", who="reviewer", error="unread_messages")
+        self.assertEqual(self.run_eachboard("read", "--task-id", "task-a", who="reviewer")["count"], 0)
+        rest = self.run_eachboard("read", who="reviewer")["messages"]
+        self.assertEqual([m["msg_id"] for m in rest], [b1["msg_id"], plain["msg_id"]])
+        self.run_eachboard("send", "now allowed", who="reviewer")
+
+    def test_task_filter_on_pending_list_and_wait(self):
+        a1 = self.task_send("a one", "task-a")
+        b1 = self.task_send("b one", "task-b")
+        self.run_eachboard("read", who="reviewer")
+        pending = self.run_eachboard("read", "--pending", "--task-id", "task-b", who="reviewer")
+        self.assertEqual([m["msg_id"] for m in pending["messages"]], [b1["msg_id"]])
+        listed = self.run_eachboard("list", "--task-id", "task-a", who="observer")
+        self.assertEqual([m["msg_id"] for m in listed["messages"]], [a1["msg_id"]])
+        forward = self.run_eachboard("list", "--after-seq", "0", "--task-id", "task-b", who="observer")
+        self.assertEqual([m["msg_id"] for m in forward["messages"]], [b1["msg_id"]])
+        self.assertEqual(self.run_eachboard("status", who="observer")["unseen"], 0)
+        self.task_send("b two", "task-b")
+        empty = self.run_eachboard("wait", "--timeout", "0", "--task-id", "task-a", who="reviewer")
+        self.assertEqual(empty["count"], 0)
+        woke = self.run_eachboard("wait", "--timeout", "0", "--task-id", "task-b", who="reviewer")
+        self.assertEqual([m["content"] for m in woke["messages"]], ["b two"])
+
+    def test_task_filter_paginates_without_skipping(self):
+        wanted = []
+        for i in range(4):
+            wanted.append(self.task_send("a" + str(i), "task-a")["msg_id"])
+            self.task_send("b" + str(i), "task-b")
+        first = self.run_eachboard("read", "--task-id", "task-a", "--limit", "2", who="reviewer")
+        second = self.run_eachboard("read", "--task-id", "task-a", "--after-seq",
+                                    str(first["next_after_seq"]), who="reviewer")
+        self.assertEqual([m["msg_id"] for m in first["messages"] + second["messages"]], wanted)
+
+    def test_task_filter_rejects_invalid_task_and_admin_is_read_only(self):
+        self.task_send("a", "task-a")
+        self.run_eachboard("read", "--task-id", "../x", who="reviewer", error="invalid_request")
+        admin = dict(self.env, EACHBOARD_KEY=self.admin_password, EACHBOARD_CONV=self.cid)
+        self.assertEqual(self.run_eachboard("read", "--task-id", "task-a", env=admin)["count"], 1)
+        self.assertEqual(self.run_eachboard("status", who="reviewer")["unseen"], 1)

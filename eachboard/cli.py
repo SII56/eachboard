@@ -65,6 +65,8 @@ def build_parser():
         sp.add_argument("--limit", type=positive, default=50 if listed else 100)
         sp.add_argument("--after-seq", type=nonnegative, default=None if listed else 0,
                         help="only return messages with a greater sequence; list defaults to the newest page")
+        sp.add_argument("--task-id", help="only messages with this task ID, plus notifications"
+                        " retracting one; other messages stay unseen")
         if name in ("read", "wait"):
             sp.add_argument("--ack", action="store_true", help="also acknowledge the returned messages (explicit ack recommended)")
         if name == "read":
