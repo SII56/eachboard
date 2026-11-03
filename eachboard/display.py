@@ -117,18 +117,22 @@ def render(data, color=False):
     if 'acked' in data:
         return highlight('Acknowledged:', 'success', color) + ' ' + ', '.join(data['acked'])
     if 'acked_by' in data:
+        def group(label, names):
+            return (highlight(label, 'label', color) + ': '
+                    + (', '.join(highlight(n, 'identity', color) for n in names) or 'none'))
+        notification = bool(data.get('retracts'))
+        lines = [field_text('msg_id', data['msg_id'], color),
+                 group('Not displayed', data.get('not_displayed', [])),
+                 # Display is not processing; only acknowledgement means processed.
+                 group('Displayed' if notification else 'Displayed, not acknowledged',
+                       data.get('displayed', []))]
+        if not notification:
+            # Retracted originals keep their acknowledgement history.
+            lines.append(group('Acknowledged', data['acked_by']))
         if data.get('ack_required') is False:
-            return '\n'.join([
-                field_text('msg_id', data['msg_id'], color),
-                highlight('Acknowledged', 'label', color) + ': ' + (', '.join(data['acked_by']) or 'none'),
-                highlight('Acknowledgement: not required' + (
-                    ' (message retracted)' if data.get('retracted') else ' (read-only notification)'), 'muted', color),
-            ])
-        return '\n'.join([
-            field_text('msg_id', data['msg_id'], color),
-            highlight('Acknowledged', 'label', color) + ': ' + (', '.join(data['acked_by']) or 'none'),
-            field_text('pending', ', '.join(data['pending']) or 'none', color),
-        ])
+            lines.append(highlight('Acknowledgement: not required' + (
+                ' (message retracted)' if data.get('retracted') else ' (read-only notification)'), 'muted', color))
+        return '\n'.join(lines)
     if 'conversations' in data:
         return '\n'.join(field_text('conv_id', item['conv_id'], color) for item in data['conversations']) or highlight('No conversations.', 'muted', color)
     lines = []

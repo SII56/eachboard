@@ -299,3 +299,23 @@ else: raise AssertionError('expected failed output')
         self.assertEqual(listed[9]['content'], '[retracted]')
         self.assertEqual(listed[14]['msg_id'], event['msg_id'])
         self.assertEqual(listed[14]['content'], 'writer retracted message #10')
+
+    def test_receipts_keep_display_history_after_retraction(self):
+        sent = self.send('to be retracted')
+        self.run_eachboard('read', who='reviewer')
+        self.run_eachboard('ack', sent['msg_id'], who='reviewer')
+        self.run_eachboard('show', sent['msg_id'], who='observer')
+        event = self.retract(sent['msg_id'])
+        original = self.run_eachboard('receipts', sent['msg_id'], who='writer')
+        self.assertEqual((original['not_displayed'], original['displayed'], original['acked_by']),
+                         ([], ['observer'], ['reviewer']))
+        self.run_eachboard('read', who='reviewer')
+        notice = self.run_eachboard('receipts', event['msg_id'], who='writer')
+        self.assertEqual((notice['not_displayed'], notice['displayed'], notice['acked_by']),
+                         (['observer'], ['reviewer'], []))
+        text = subprocess.run([sys.executable, '-B', '-m', 'eachboard', 'receipts', event['msg_id']],
+                              cwd=self.cwd, env=self.identity('writer'), capture_output=True,
+                              text=True, check=True).stdout
+        self.assertIn('Displayed: reviewer', text)
+        self.assertNotIn('Acknowledged:', text)
+        self.assertIn('Acknowledgement: not required (read-only notification)', text)

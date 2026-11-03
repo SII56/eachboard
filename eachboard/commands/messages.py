@@ -156,11 +156,18 @@ def cmd_receipts(ctx, args):
     cid = ctx.current_conv()
     record = ctx.store.get_message(cid, args.msg_id)
     participants = ctx.store.read_metadata(cid)["participants"]
-    recipients = record.get("to") or participants
-    acked = [who for who in recipients if who != record["sender"] and ctx.store.has_stamp(cid, args.msg_id, who)]
+    # Actual recipients only: the sender is never its own recipient, and the
+    # administrator is not a participant and writes no journals.
+    recipients = [who for who in (record.get("to") or participants) if who != record["sender"]]
+    mid = record["msg_id"]
+    acked = [who for who in recipients if ctx.store.has_stamp(cid, mid, who)]
+    # An acknowledgement implies display; each recipient lands in exactly one group.
+    displayed = [who for who in recipients if who not in acked and ctx.store.has_seen(cid, mid, who)]
+    not_displayed = [who for who in recipients if who not in acked and who not in displayed]
     ack_required = not record.get("retracts") and not record.get("retracted")
-    pending = [who for who in recipients if who != record["sender"] and who not in acked] if ack_required else []
-    ctx.out({"ok": True, "msg_id": args.msg_id, "acked_by": acked, "pending": pending,
+    pending = [who for who in recipients if who not in acked] if ack_required else []
+    ctx.out({"ok": True, "msg_id": mid, "not_displayed": not_displayed, "displayed": displayed,
+           "acked_by": acked, "pending": pending,
            "ack_required": ack_required, "retracted": record.get("retracted", False),
            "retracts": record.get("retracts")})
 
