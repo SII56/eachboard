@@ -685,3 +685,107 @@ print('bounded reads verified')
         admin = dict(self.env, EACHBOARD_KEY=self.admin_password, EACHBOARD_CONV=self.cid)
         self.assertEqual(self.run_eachboard("read", "--task-id", "task-a", env=admin)["count"], 1)
         self.assertEqual(self.run_eachboard("status", who="reviewer")["unseen"], 1)
+
+    def draft(self, body="draft body\r\n\tline two", name="draft.txt"):
+        path = self.workspace / name
+        path.write_bytes(body.encode("utf-8") if isinstance(body, str) else body)
+        return path
+
+    def test_send_file_preserves_bytes_and_keeps_draft_by_default(self):
+        path = self.draft()
+        sent = self.run_eachboard("send", "--file", "draft.txt", "--to", "reviewer", who="writer")
+        self.assertTrue(path.exists())
+        self.assertFalse(sent["draft_deleted"])
+        self.assertEqual(sent["draft"], str(path.resolve()))
+        shown = self.run_eachboard("read", who="reviewer")["messages"][0]
+        self.assertEqual(shown["content"], "draft body\r\n\tline two")
+
+    def test_send_file_delete_on_success_removes_draft(self):
+        path = self.draft()
+        sent = self.run_eachboard("send", "--file", str(path), "--delete-on-success", who="writer")
+        self.assertTrue(sent["draft_deleted"])
+        self.assertNotIn("warnings", sent)
+        self.assertFalse(path.exists())
+
+    def test_failed_send_keeps_draft(self):
+        self.run_eachboard("send", "first", who="reviewer")
+        path = self.draft()
+        self.run_eachboard("send", "--file", "draft.txt", "--delete-on-success", who="writer",
+                           error="unread_messages")
+        self.assertTrue(path.exists())
+        bad = self.draft(b"\xff\xfe not utf-8", name="bad.txt")
+        self.run_eachboard("send", "--file", "bad.txt", "--delete-on-success", who="observer",
+                           error="invalid_draft")
+        self.assertTrue(bad.exists())
+        self.run_eachboard("send", "--file", "missing.txt", who="observer", error="invalid_draft")
+        self.run_eachboard("send", "--file", ".", who="observer", error="invalid_draft")
+        self.assertEqual(self.run_eachboard("list", who="reviewer")["count"], 1)
+
+    def test_send_sources_are_mutually_exclusive(self):
+        self.draft()
+        self.run_eachboard("send", "text", "--file", "draft.txt", who="writer", error="invalid_request")
+        for args in (("--content", "x", "--file", "draft.txt"), ("--stdin", "--file", "draft.txt")):
+            with self.subTest(args=args):
+                self.run_eachboard("send", *args, who="writer", stdin="", error="invalid_arguments")
+        self.run_eachboard("send", "text", "--delete-on-success", who="writer", error="invalid_request")
+        self.assertEqual(self.run_eachboard("list", who="writer")["count"], 0)
+        self.assertTrue((self.workspace / "draft.txt").exists())
+
+    def test_delete_failure_reports_sent_message_with_warning(self):
+        path = self.draft()
+        self.workspace.chmod(0o555)
+        self.addCleanup(self.workspace.chmod, 0o755)
+        p = subprocess.run([sys.executable, "-m", "eachboard", "send", "--file", str(path),
+                            "--delete-on-success"], env=self.identity("writer"),
+                           capture_output=True, text=True, cwd=self.cwd)
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertIn("Message sent.", p.stdout)
+        self.assertIn("was sent; draft was not deleted", p.stdout)
+        self.assertIn("do not resend", p.stdout)
+        self.assertNotIn("Error", p.stdout)
+        self.assertTrue(path.exists())
+        self.assertEqual(self.run_eachboard("list", who="reviewer")["count"], 1)
+
+    def run_send_with_publish_hook(self, path, hook):
+        program = '''from eachboard import commands
+from eachboard.context import BoardContext
+from types import SimpleNamespace
+import json, os, pathlib
+c = BoardContext(json_output=True)
+path = pathlib.Path({path!r})
+original = c.store.publish_message
+def publish(*args, **kwargs):
+    mid = original(*args, **kwargs)
+{hook}
+    return mid
+c.store.publish_message = publish
+commands.cmd_send(c, SimpleNamespace(text=None, content=None, stdin=False, file=str(path),
+                  delete_on_success=True, to=None, reply_to=None, task_id=None))
+'''.format(path=str(path), hook=hook)
+        p = subprocess.run([sys.executable, "-B", "-c", program], cwd=APP,
+                           env=self.identity("writer"), capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_draft_changed_during_send_is_not_deleted(self):
+        hooks = {
+            "rewritten": "    path.write_text('newer draft')",
+            # Same size, same inode, original mtime restored: only the hash differs.
+            "same size": "    st = os.stat(path); path.write_bytes(b'DRAFT BODY\\r\\n\\tLINE TWO');"
+                         " os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))",
+            "replaced": "    tmp = path.with_name('new.txt'); tmp.write_text('replacement'); os.replace(tmp, path)",
+            "symlink": "    target = path.with_name('target.txt'); path.rename(target); path.symlink_to(target)",
+            "removed": "    path.unlink()",
+        }
+        for name, hook in hooks.items():
+            with self.subTest(change=name):
+                path = self.draft(name="draft-" + name.replace(" ", "-") + ".txt")
+                result = self.run_send_with_publish_hook(path, hook)
+                self.assertTrue(result["ok"])
+                self.assertFalse(result["draft_deleted"])
+                self.assertIn(result["msg_id"], result["warnings"][0])
+                if name != "removed":
+                    self.assertTrue(path.exists() or path.is_symlink())
+                self.run_eachboard("read", who="reviewer")
+        self.assertEqual(self.run_eachboard("list", who="observer")["count"], len(hooks))
+        self.assertEqual((self.workspace / "target.txt").read_bytes(), b"draft body\r\n\tline two")

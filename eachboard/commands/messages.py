@@ -1,15 +1,68 @@
 """Messages command handlers; each receives an explicit context."""
+import hashlib
+import os
+import stat
 import sys
 import time
+from pathlib import Path
+
+
+def read_draft(ctx, name):
+    """Read a draft file as raw UTF-8 and remember exactly what was read."""
+    path = Path(name).expanduser()
+    path = path if path.is_absolute() else ctx.cwd / path
+    try:
+        with path.open("rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                ctx.store.fail("draft is not a regular file: " + str(path), "invalid_draft")
+            raw = stream.read()
+    except OSError as exc:
+        ctx.store.fail("cannot read draft " + str(path) + ": " + (exc.strerror or str(exc)), "invalid_draft")
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        ctx.store.fail("draft is not valid UTF-8 text: " + str(path), "invalid_draft")
+    snapshot = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, hashlib.sha256(raw).digest())
+    return path, content, snapshot
+
+
+def delete_draft(path, snapshot):
+    """Remove the draft only if it is still the file that was sent.
+
+    Returns None on success or the reason it was kept. A replaced, rewritten or
+    symlinked path is left alone. A tiny window remains between the final check
+    and unlink; filesystems offer no compare-and-delete.
+    """
+    try:
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode):
+            return "draft path is now a symbolic link"
+        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != snapshot[:4]:
+            return "draft changed after it was read"
+        if hashlib.sha256(path.read_bytes()).digest() != snapshot[4]:
+            return "draft changed after it was read"
+        path.unlink()
+    except OSError as exc:
+        return exc.strerror or str(exc)
+    return None
 
 
 def cmd_send(ctx, args):
     cid = ctx.current_conv()
     ctx.require_participant()
     text = getattr(args, "text", None)
-    if sum((text is not None, args.content is not None, args.stdin)) != 1:
-        ctx.store.fail("use exactly one of TEXT, --content or --stdin")
-    if args.stdin:
+    draft_name = getattr(args, "file", None)
+    delete = getattr(args, "delete_on_success", False)
+    if sum((text is not None, args.content is not None, args.stdin, draft_name is not None)) != 1:
+        ctx.store.fail("use exactly one of TEXT, --content, --stdin or --file")
+    if delete and draft_name is None:
+        ctx.store.fail("--delete-on-success requires --file")
+    draft = None
+    if draft_name is not None:
+        draft = read_draft(ctx, draft_name)
+        content = draft[1]
+    elif args.stdin:
         # Bypass universal-newline conversion when stdin is a byte stream.
         stream = getattr(sys.stdin, 'buffer', None)
         content = stream.read().decode('utf-8') if stream is not None else sys.stdin.read()
@@ -41,7 +94,19 @@ def cmd_send(ctx, args):
         meta = {"seq": seq, "sender": ctx.who, "created": time.time(), "to": recipients,
                 "reply_to": args.reply_to, "task_id": args.task_id}
         mid = ctx.store.publish_message(cid, meta, content)
-    ctx.out({"ok": True, "msg_id": mid, **meta})
+    result = {"ok": True, "msg_id": mid, **meta}
+    if draft is not None:
+        # The message is published; nothing below may look like a send failure.
+        result["draft"] = str(draft[0])
+        if delete:
+            reason = delete_draft(draft[0], draft[2])
+            result["draft_deleted"] = reason is None
+            if reason is not None:
+                result["warnings"] = ["message " + mid + " was sent; draft was not deleted ("
+                                      + reason + "); do not resend"]
+        else:
+            result["draft_deleted"] = False
+    ctx.out(result)
 
 
 def output_page(ctx, cid, msgs, after_seq=0, ack=False):

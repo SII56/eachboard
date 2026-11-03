@@ -16,6 +16,7 @@ LABELS = {
     'retracts': 'Retracts', 'retracted': 'Retracted',
     'retraction_id': 'Retraction', 'retracted_by': 'Retracted by',
     'retracted_at': 'Retracted at',
+    'draft': 'Draft', 'draft_deleted': 'Draft deleted',
 }
 
 
